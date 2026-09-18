@@ -23,10 +23,6 @@ TrumaiNetBoxApp::TrumaiNetBoxApp() {
 }
 
 void TrumaiNetBoxApp::update() {
-  // Call listeners in after method 'lin_multiframe_received' call.
-  // Because 'lin_multiframe_received' is time critical and all these
-  // sensors can take some time.
-
   this->airconAuto_.update();
   this->airconManual_.update();
   this->clock_.update();
@@ -52,35 +48,29 @@ void TrumaiNetBoxApp::update() {
 #endif
 }
 
+/*
+ * ============================================================
+ * PATCH TRUMA COMBI D4 2021
+ *
+ * Le CP Plus de ce fourgon interroge :
+ *
+ *     17 46 10 03
+ *
+ * au lieu de l'identifiant iNet Box classique :
+ *
+ *     17 46 00 1F
+ *
+ * Capture réelle :
+ *
+ * PID3C 7F 06 B2 00 17 46 10 03
+ * ============================================================
+ */
 const std::array<uint8_t, 4> TrumaiNetBoxApp::lin_identifier() {
-  // Supplier Id: 0x4617 - Truma
-  //
-  // Unknown:
-  // 17.46.01.03 - old Combi model
-  // 17.46.10.03 - Unknown more comms required for init.
-  // 17.46.20.03 - Unknown more comms required for init.
-  //
-  // Heater:
-  // 17.46.40.03 - H2.00.01 - 0340.xx Combi 4/6
-  //
-  // Aircon:
-  // 17.46.00.0C - A23.70.0 - 0C00.xx
-  // 17.46.01.0C - A23.70.0 - 0C01.xx
-  // 17.46.02.0C
-  // 17.46.03.0C
-  // 17.46.04.0C - A23.70.0 - 0C04.xx
-  // 17.46.05.0C - A23.70.0 - 0C05.xx
-  // 17.46.06.0C - A23.70.0 - 0C06.xx
-  // 17.46.07.0C - A23.70.0 - 0C07.xx
-  //
-  // iNet Box:
-  // 17.46.00.1F - T23.70.0 - 1F00.xx iNet Box
-
   return {
       0x17,
       0x46,
-      0x00,
-      0x1F
+      0x10,
+      0x03
   };
 }
 
@@ -120,13 +110,11 @@ void TrumaiNetBoxApp::lin_reset_device() {
 bool TrumaiNetBoxApp::answer_lin_order_(const uint8_t pid) {
   // Alive message
   if (pid == LIN_PID_TRUMA_INET_BOX) {
-
     std::array<uint8_t, 8> response =
         this->lin_empty_response_;
 
     if (this->updates_to_send_.empty() &&
         !this->has_update_to_submit_()) {
-
       response[0] = 0xFE;
     }
 
@@ -146,7 +134,6 @@ bool TrumaiNetBoxApp::lin_read_field_by_identifier_(
     std::array<uint8_t, 5> *response) {
 
   if (identifier == 0x00) {
-
     const auto lin_identifier =
         this->lin_identifier();
 
@@ -159,7 +146,6 @@ bool TrumaiNetBoxApp::lin_read_field_by_identifier_(
     return true;
 
   } else if (identifier == 0x20) {
-
     const auto lin_identifier =
         this->lin_identifier();
 
@@ -170,8 +156,6 @@ bool TrumaiNetBoxApp::lin_read_field_by_identifier_(
     return true;
 
   } else if (identifier == 0x22) {
-
-    // Init is failing if missing.
     return true;
   }
 
@@ -196,13 +180,11 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     if (message[i] != truma_message_header[i] &&
         message[i] != alde_message_header[i]) {
-
       return nullptr;
     }
   }
 
   if (message[4] != (uint8_t) this->company_) {
-
     ESP_LOGI(
         TAG,
         "Switch company to 0x%02x",
@@ -215,18 +197,14 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
   /*
    * ==========================================================
-   * CP PLUS DEMANDE LE STATE BUFFER
+   * READ STATE BUFFER
    * ==========================================================
    */
-
   if (message[0] == LIN_SID_READ_STATE_BUFFER) {
-
     memset(response, 0, sizeof(response));
 
     auto response_frame =
         reinterpret_cast<StatusFrame *>(response);
-
-    // The order must match has_update_to_submit_().
 
     if (this->init_received_.load(
             std::memory_order_relaxed) == 0) {
@@ -247,12 +225,10 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
     } else if (this->heater_.has_update()) {
 
       /*
-       * ======================================================
-       * C'EST CETTE BRANCHE QUE NOUS VOULONS ATTEINDRE
-       * AVEC LE D4 2021.
-       * ======================================================
+       * D4 2021 :
+       * si nous arrivons ici, le CP Plus est venu chercher
+       * la commande chauffage en attente.
        */
-
       ESP_LOGW(
           TAG,
           "D4 2021: Requested read -> Sending heater update"
@@ -354,30 +330,19 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 #endif
 
     } else {
-
       ESP_LOGW(
           TAG,
-          "Requested read: CP Plus asks for an update, "
-          "but I have none."
+          "Requested read: CP Plus asks for an update, but I have none."
       );
     }
   }
 
-  /*
-   * ==========================================================
-   * FILL STATE BUFFER
-   * ==========================================================
-   */
-
   if (message_len < sizeof(StatusFrame) &&
       message[0] == LIN_SID_FIll_STATE_BUFFFER) {
-
     return nullptr;
   }
 
-  // Need at least a full header.
   if (message_len < sizeof(StatusFrameHeader)) {
-
     ESP_LOGW(
         TAG,
         "Truma frame too short (%u < %u).",
@@ -394,10 +359,7 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
   auto header =
       &statusFrame->genericHeader;
 
-  /*
-   * Validate Truma frame checksum
-   */
-
+  // Validate Truma frame checksum.
   if (header->checksum !=
           data_checksum(
               &statusFrame->raw[10],
@@ -427,7 +389,6 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
    * HEATER
    * ==========================================================
    */
-
   if (header->message_type ==
           STATUS_FRAME_HEATER &&
       header->message_length ==
@@ -449,7 +410,6 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
    * AIRCON MANUAL
    * ==========================================================
    */
-
   } else if (
       header->message_type ==
           STATUS_FRAME_AIRCON_MANUAL &&
@@ -485,7 +445,6 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
    * AIRCON AUTO
    * ==========================================================
    */
-
   } else if (
       header->message_type ==
           STATUS_FRAME_AIRCON_AUTO &&
@@ -521,7 +480,6 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
    * TIMER
    * ==========================================================
    */
-
   } else if (
       header->message_type ==
           STATUS_FRAME_TIMER &&
@@ -544,7 +502,6 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
    * CLOCK
    * ==========================================================
    */
-
   } else if (
       header->message_type ==
           STATUS_FRAME_CLOCK &&
@@ -567,7 +524,6 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
    * CONFIG
    * ==========================================================
    */
-
   } else if (
       header->message_type ==
           STATUS_FRAME_CONFIG &&
@@ -590,7 +546,6 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
    * ACK
    * ==========================================================
    */
-
   } else if (
       header->message_type ==
           STATUS_FRAME_RESPONSE_ACK &&
@@ -610,7 +565,6 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
       );
 
     } else {
-
       ESP_LOGI(
           TAG,
           "StatusFrameResponseAck"
@@ -620,15 +574,12 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
     ESP_LOGD(
         TAG,
         "StatusFrameResponseAck %02X %s %02X",
-
         statusFrame->genericHeader.command_counter,
-
         data.error_code ==
                 ResponseAckResult::
                     RESPONSE_ACK_RESULT_OKAY
             ? " OKAY "
             : " FAILED ",
-
         (uint8_t) data.error_code
     );
 
@@ -646,7 +597,6 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
    * DEVICES
    * ==========================================================
    */
-
   } else if (
       header->message_type ==
           STATUS_FRAME_DEVICES &&
@@ -663,19 +613,14 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     ESP_LOGD(
         TAG,
-        "StatusFrameDevice %d/%d - "
-        "%d.%02d.%02d %04X.%02X (%02X %02X)",
-
+        "StatusFrameDevice %d/%d - %d.%02d.%02d %04X.%02X (%02X %02X)",
         device.device_id + 1,
         device.device_count,
-
         device.software_revision[0],
         device.software_revision[1],
         device.software_revision[2],
-
         device.hardware_revision_major,
         device.hardware_revision_minor,
-
         device.unknown_2,
         device.unknown_3
     );
@@ -709,12 +654,9 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
       }
 
       if (found_unknown_value) {
-
         ESP_LOGW(
             TAG,
-            "Unknown information in "
-            "StatusFrameDevice found. "
-            "Please report."
+            "Unknown information in StatusFrameDevice found. Please report."
         );
       }
     }
@@ -727,7 +669,6 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
       // Assumption first device is Heater.
       if (device.device_id == 1) {
-
         this->heater_device_.store(
             truma_device,
             std::memory_order_relaxed
@@ -736,17 +677,12 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
       // Assumption second device is Aircon.
       if (device.device_id == 2) {
-
         this->aircon_device_.store(
             TRUMA_DEVICE::AIRCON_DEVICE,
             std::memory_order_relaxed
         );
       }
     }
-
-    /*
-     * Original initialization logic.
-     */
 
     if (device.device_count == 2 &&
         this->heater_device_.load(
@@ -776,7 +712,6 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
     return response;
 
   } else {
-
     ESP_LOGW(
         TAG,
         "Unknown message type %02X",
@@ -785,60 +720,33 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
   }
 
   (*return_len) = 0;
-
   return nullptr;
 }
 
-
 /*
  * ============================================================
- * UPDATE NOTIFICATION
- *
  * PATCH TRUMA COMBI D4 2021
- * ============================================================
  *
- * Le D4 2021 communique correctement sur le bus LIN mais la
- * détection classique du heater par les StatusFrameDevice ne
- * termine pas l'initialisation havanti.
+ * Le D4 ne fournit pas à la bibliothèque l'initialisation
+ * attendue par le chemin historique havanti.
  *
- * Avant ce patch :
+ * Si une vraie commande chauffage est déjà préparée, on
+ * autorise le mécanisme iNet existant à annoncer cette mise
+ * à jour au CP Plus.
  *
- *   heater_.has_update() == true
- *   init_received_       == 0
- *
- * La commande reste donc en attente et le CP Plus n'est jamais
- * informé qu'une mise à jour heater est disponible.
- *
- * Lorsqu'une vraie commande heater est en attente, nous
- * autorisons donc le mécanisme iNet existant à continuer.
- *
- * Aucune trame PID03/PID07 n'est injectée directement ici.
+ * Aucune réponse PID03/PID07 n'est fabriquée ici.
  * ============================================================
  */
-
 bool TrumaiNetBoxApp::has_update_to_submit_() {
-
-  /*
-   * Cette méthode peut être appelée depuis le traitement LIN.
-   *
-   * PAS DE LOGGING ICI.
-   */
+  // No logging here: this may be called from LIN handling.
 
   const bool heater_update =
       this->heater_.has_update();
 
-
   /*
-   * ----------------------------------------------------------
-   * PATCH D4
-   *
-   * Une commande heater est réellement en attente mais
-   * l'initialisation n'a jamais été validée.
-   *
-   * On débloque uniquement dans ce cas.
-   * ----------------------------------------------------------
+   * D4 2021 bootstrap :
+   * la commande heater existe mais init_received_ est toujours 0.
    */
-
   if (heater_update &&
       this->init_received_.load(
           std::memory_order_relaxed) == 0) {
@@ -854,13 +762,9 @@ bool TrumaiNetBoxApp::has_update_to_submit_() {
     );
   }
 
-
   /*
-   * ----------------------------------------------------------
-   * COMPORTEMENT ORIGINAL
-   * ----------------------------------------------------------
+   * Comportement normal de la bibliothèque.
    */
-
   if (this->init_requested_.load(
           std::memory_order_relaxed) == 0) {
 
