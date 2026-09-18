@@ -40,7 +40,9 @@ void TrumaiNetBoxApp::update() {
       !this->update_status_clock_done &&
       init_received_snapshot > 0) {
 
-    if ((micros() - init_received_snapshot) > CLOCK_SYNC_DELAY_US) {
+    if ((micros() - init_received_snapshot) >
+        CLOCK_SYNC_DELAY_US) {
+
       this->update_status_clock_done = true;
       this->clock_.action_write_time();
     }
@@ -48,31 +50,34 @@ void TrumaiNetBoxApp::update() {
 #endif
 }
 
+
 /*
  * ============================================================
- * PATCH TRUMA COMBI D4 2021
+ * IDENTITE LIN INET BOX
+ * ============================================================
  *
- * Le CP Plus de ce fourgon interroge :
+ * IMPORTANT D4 2021 :
  *
- *     17 46 10 03
+ * On conserve l'identité réelle d'une Truma iNet Box :
  *
- * au lieu de l'identifiant iNet Box classique :
+ *   17 46 00 1F
  *
- *     17 46 00 1F
+ * On NE prend PAS l'identité 17 46 10 03 observée sur le bus,
+ * car un autre équipement Truma répond déjà à cette identité.
  *
- * Capture réelle :
- *
- * PID3C 7F 06 B2 00 17 46 10 03
  * ============================================================
  */
-const std::array<uint8_t, 4> TrumaiNetBoxApp::lin_identifier() {
+const std::array<uint8_t, 4>
+TrumaiNetBoxApp::lin_identifier() {
+
   return {
-      0x17,
-      0x46,
-      0x10,
-      0x03
+      0x17,  // Supplier ID
+      0x46,  // Supplier ID
+      0x00,  // Function ID
+      0x1F   // iNet Box
   };
 }
+
 
 void TrumaiNetBoxApp::lin_heartbeat() {
   this->device_registered_.store(
@@ -80,6 +85,7 @@ void TrumaiNetBoxApp::lin_heartbeat() {
       std::memory_order_relaxed
   );
 }
+
 
 void TrumaiNetBoxApp::lin_reset_device() {
   LinBusProtocol::lin_reset_device();
@@ -107,14 +113,28 @@ void TrumaiNetBoxApp::lin_reset_device() {
   );
 }
 
+
 bool TrumaiNetBoxApp::answer_lin_order_(const uint8_t pid) {
-  // Alive message
+
+  /*
+   * Alive / notification iNet Box.
+   *
+   * Si aucune réponse diagnostic n'attend dans la queue et
+   * aucune mise à jour applicative n'est en attente :
+   *
+   *   FE FF FF FF FF FF FF FF
+   *
+   * Sinon on laisse le premier octet à FF pour signaler
+   * quelque chose à récupérer.
+   */
   if (pid == LIN_PID_TRUMA_INET_BOX) {
+
     std::array<uint8_t, 8> response =
         this->lin_empty_response_;
 
     if (this->updates_to_send_.empty() &&
         !this->has_update_to_submit_()) {
+
       response[0] = 0xFE;
     }
 
@@ -129,11 +149,16 @@ bool TrumaiNetBoxApp::answer_lin_order_(const uint8_t pid) {
   return LinBusProtocol::answer_lin_order_(pid);
 }
 
+
 bool TrumaiNetBoxApp::lin_read_field_by_identifier_(
     uint8_t identifier,
     std::array<uint8_t, 5> *response) {
 
+  /*
+   * LIN Product Identification
+   */
   if (identifier == 0x00) {
+
     const auto lin_identifier =
         this->lin_identifier();
 
@@ -141,11 +166,17 @@ bool TrumaiNetBoxApp::lin_read_field_by_identifier_(
     (*response)[1] = lin_identifier[1];
     (*response)[2] = lin_identifier[2];
     (*response)[3] = lin_identifier[3];
+
+    // Variant
     (*response)[4] = 0x01;
 
     return true;
 
+  /*
+   * Product details displayed by CP Plus
+   */
   } else if (identifier == 0x20) {
+
     const auto lin_identifier =
         this->lin_identifier();
 
@@ -155,12 +186,17 @@ bool TrumaiNetBoxApp::lin_read_field_by_identifier_(
 
     return true;
 
+  /*
+   * Unknown, but required during original iNet init.
+   */
   } else if (identifier == 0x22) {
+
     return true;
   }
 
   return false;
 }
+
 
 const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
     const uint8_t *message,
@@ -169,7 +205,12 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
   static uint8_t response[sizeof(StatusFrame)] = {};
 
-  // Validate message prefix.
+  /*
+   * ==========================================================
+   * VALIDATION PREFIX
+   * ==========================================================
+   */
+
   if (message_len < truma_message_header.size()) {
     return nullptr;
   }
@@ -180,11 +221,13 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     if (message[i] != truma_message_header[i] &&
         message[i] != alde_message_header[i]) {
+
       return nullptr;
     }
   }
 
   if (message[4] != (uint8_t) this->company_) {
+
     ESP_LOGI(
         TAG,
         "Switch company to 0x%02x",
@@ -195,16 +238,24 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
         (TRUMA_COMPANY) message[4];
   }
 
+
   /*
    * ==========================================================
    * READ STATE BUFFER
    * ==========================================================
    */
+
   if (message[0] == LIN_SID_READ_STATE_BUFFER) {
+
     memset(response, 0, sizeof(response));
 
     auto response_frame =
         reinterpret_cast<StatusFrame *>(response);
+
+    /*
+     * L'ordre doit rester identique à celui utilisé
+     * dans has_update_to_submit_().
+     */
 
     if (this->init_received_.load(
             std::memory_order_relaxed) == 0) {
@@ -225,9 +276,7 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
     } else if (this->heater_.has_update()) {
 
       /*
-       * D4 2021 :
-       * si nous arrivons ici, le CP Plus est venu chercher
-       * la commande chauffage en attente.
+       * C'est LE log important pour notre essai D4.
        */
       ESP_LOGW(
           TAG,
@@ -308,6 +357,7 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
       return response;
 
 #ifdef USE_TIME
+
     } else if (this->clock_.has_update()) {
 
       ESP_LOGD(
@@ -327,9 +377,11 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
       );
 
       return response;
+
 #endif
 
     } else {
+
       ESP_LOGW(
           TAG,
           "Requested read: CP Plus asks for an update, but I have none."
@@ -337,12 +389,28 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
     }
   }
 
+
+  /*
+   * ==========================================================
+   * FILL STATE BUFFER
+   * ==========================================================
+   */
+
   if (message_len < sizeof(StatusFrame) &&
       message[0] == LIN_SID_FIll_STATE_BUFFFER) {
+
     return nullptr;
   }
 
+
+  /*
+   * ==========================================================
+   * HEADER VALIDATION
+   * ==========================================================
+   */
+
   if (message_len < sizeof(StatusFrameHeader)) {
+
     ESP_LOGW(
         TAG,
         "Truma frame too short (%u < %u).",
@@ -359,7 +427,13 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
   auto header =
       &statusFrame->genericHeader;
 
-  // Validate Truma frame checksum.
+
+  /*
+   * ==========================================================
+   * CHECKSUM
+   * ==========================================================
+   */
+
   if (header->checksum !=
           data_checksum(
               &statusFrame->raw[10],
@@ -377,18 +451,23 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
     return nullptr;
   }
 
-  // Create acknowledge response.
+
+  /*
+   * Réponse ACK de base.
+   */
   response[0] =
       (header->service_identifier |
        LIN_SID_RESPONSE);
 
   (*return_len) = 1;
 
+
   /*
    * ==========================================================
    * HEATER
    * ==========================================================
    */
+
   if (header->message_type ==
           STATUS_FRAME_HEATER &&
       header->message_length ==
@@ -405,11 +484,13 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     return response;
 
+
   /*
    * ==========================================================
    * AIRCON MANUAL
    * ==========================================================
    */
+
   } else if (
       header->message_type ==
           STATUS_FRAME_AIRCON_MANUAL &&
@@ -427,6 +508,7 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     return response;
 
+
   } else if (
       header->message_type ==
           STATUS_FRAME_AIRCON_MANUAL_INIT &&
@@ -440,11 +522,13 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     return response;
 
+
   /*
    * ==========================================================
    * AIRCON AUTO
    * ==========================================================
    */
+
   } else if (
       header->message_type ==
           STATUS_FRAME_AIRCON_AUTO &&
@@ -462,6 +546,7 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     return response;
 
+
   } else if (
       header->message_type ==
           STATUS_FRAME_AIRCON_AUTO_INIT &&
@@ -475,11 +560,13 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     return response;
 
+
   /*
    * ==========================================================
    * TIMER
    * ==========================================================
    */
+
   } else if (
       header->message_type ==
           STATUS_FRAME_TIMER &&
@@ -497,11 +584,13 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     return response;
 
+
   /*
    * ==========================================================
    * CLOCK
    * ==========================================================
    */
+
   } else if (
       header->message_type ==
           STATUS_FRAME_CLOCK &&
@@ -519,11 +608,13 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     return response;
 
+
   /*
    * ==========================================================
    * CONFIG
    * ==========================================================
    */
+
   } else if (
       header->message_type ==
           STATUS_FRAME_CONFIG &&
@@ -541,11 +632,13 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     return response;
 
+
   /*
    * ==========================================================
-   * ACK
+   * RESPONSE ACK
    * ==========================================================
    */
+
   } else if (
       header->message_type ==
           STATUS_FRAME_RESPONSE_ACK &&
@@ -565,6 +658,7 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
       );
 
     } else {
+
       ESP_LOGI(
           TAG,
           "StatusFrameResponseAck"
@@ -592,11 +686,13 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     return response;
 
+
   /*
    * ==========================================================
    * DEVICES
    * ==========================================================
    */
+
   } else if (
       header->message_type ==
           STATUS_FRAME_DEVICES &&
@@ -654,6 +750,7 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
       }
 
       if (found_unknown_value) {
+
         ESP_LOGW(
             TAG,
             "Unknown information in StatusFrameDevice found. Please report."
@@ -661,28 +758,43 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
       }
     }
 
-    // First submitted device is CP Plus.
+
+    /*
+     * Premier device = CP Plus
+     */
     const auto is_CPPLUSDevice =
         device.device_id == 0;
 
+
     if (!is_CPPLUSDevice) {
 
-      // Assumption first device is Heater.
+      /*
+       * Premier périphérique après CP Plus = Heater
+       */
       if (device.device_id == 1) {
+
         this->heater_device_.store(
             truma_device,
             std::memory_order_relaxed
         );
       }
 
-      // Assumption second device is Aircon.
+      /*
+       * Deuxième périphérique après CP Plus = Aircon
+       */
       if (device.device_id == 2) {
+
         this->aircon_device_.store(
             TRUMA_DEVICE::AIRCON_DEVICE,
             std::memory_order_relaxed
         );
       }
     }
+
+
+    /*
+     * Initialisation standard havanti.
+     */
 
     if (device.device_count == 2 &&
         this->heater_device_.load(
@@ -711,7 +823,15 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
 
     return response;
 
+
+  /*
+   * ==========================================================
+   * UNKNOWN
+   * ==========================================================
+   */
+
   } else {
+
     ESP_LOGW(
         TAG,
         "Unknown message type %02X",
@@ -719,34 +839,50 @@ const uint8_t *TrumaiNetBoxApp::lin_multiframe_received(
     );
   }
 
+
   (*return_len) = 0;
   return nullptr;
 }
 
+
 /*
  * ============================================================
- * PATCH TRUMA COMBI D4 2021
+ * D4 2021 - UPDATE NOTIFICATION
+ * ============================================================
  *
- * Le D4 ne fournit pas à la bibliothèque l'initialisation
- * attendue par le chemin historique havanti.
+ * Le problème rencontré sur notre Combi D4 :
  *
- * Si une vraie commande chauffage est déjà préparée, on
- * autorise le mécanisme iNet existant à annoncer cette mise
- * à jour au CP Plus.
+ * heater_.update_submit() prépare correctement la commande,
+ * mais l'initialisation iNet standard ne passe pas jusqu'à
+ * init_received_.
  *
- * Aucune réponse PID03/PID07 n'est fabriquée ici.
+ * Dans le code original, tant que init_received_ == 0,
+ * heater_.has_update() n'est donc jamais annoncé.
+ *
+ * Pour le test D4 :
+ *
+ * si une vraie commande chauffage est en attente,
+ * on autorise le mécanisme existant à passer dans l'état
+ * "initialisé".
+ *
+ * IMPORTANT :
+ * cette fonction peut être appelée depuis le traitement LIN.
+ * PAS DE LOG ici.
+ *
  * ============================================================
  */
 bool TrumaiNetBoxApp::has_update_to_submit_() {
-  // No logging here: this may be called from LIN handling.
 
   const bool heater_update =
       this->heater_.has_update();
 
+
   /*
-   * D4 2021 bootstrap :
-   * la commande heater existe mais init_received_ est toujours 0.
+   * ==========================================================
+   * D4 BOOTSTRAP
+   * ==========================================================
    */
+
   if (heater_update &&
       this->init_received_.load(
           std::memory_order_relaxed) == 0) {
@@ -762,9 +898,13 @@ bool TrumaiNetBoxApp::has_update_to_submit_() {
     );
   }
 
+
   /*
-   * Comportement normal de la bibliothèque.
+   * ==========================================================
+   * INIT REQUEST
+   * ==========================================================
    */
+
   if (this->init_requested_.load(
           std::memory_order_relaxed) == 0) {
 
@@ -774,6 +914,13 @@ bool TrumaiNetBoxApp::has_update_to_submit_() {
     );
 
     return true;
+
+
+  /*
+   * ==========================================================
+   * WAIT INIT
+   * ==========================================================
+   */
 
   } else if (
       this->init_received_.load(
@@ -796,6 +943,13 @@ bool TrumaiNetBoxApp::has_update_to_submit_() {
       return true;
     }
 
+
+  /*
+   * ==========================================================
+   * UPDATE AVAILABLE
+   * ==========================================================
+   */
+
   } else if (
       this->airconAuto_.has_update() ||
       this->airconManual_.has_update() ||
@@ -808,6 +962,10 @@ bool TrumaiNetBoxApp::has_update_to_submit_() {
             std::memory_order_relaxed
         );
 
+
+    /*
+     * Première notification.
+     */
     if (update_time_snapshot == 0) {
 
       this->update_time_.store(
@@ -818,6 +976,10 @@ bool TrumaiNetBoxApp::has_update_to_submit_() {
       return true;
     }
 
+
+    /*
+     * Retry toutes les 5 secondes.
+     */
     auto update_wait_time =
         micros() -
         update_time_snapshot;
@@ -834,8 +996,10 @@ bool TrumaiNetBoxApp::has_update_to_submit_() {
     }
   }
 
+
   return false;
 }
+
 
 }  // namespace truma_inetbox
 }  // namespace esphome
